@@ -1,3 +1,8 @@
+        Our SED code gives correct magnitudes if the SED is in units of
+          ergs/s/cm/cm/Angstrom, and our distance class gives distances in
+          Mpc/h, so we will need to use the conversion Mpc = 3.08568e24cm
+          and assume a value for h.
+
 The codes in this project will allow you to simulate observations of the galaxy-galaxy strong lensing population as seen by upcoming surveys.
 
 ===============================================================================
