@@ -6,7 +6,7 @@ import glob
 import os
 from math import log10, pi
 
-from numpy import loadtxt
+import numpy as np
 from scipy.interpolate import splev, splint, splrep
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -27,9 +27,9 @@ def filterfromfile(file):
     """
     Create a filter model from a file.
     """
-    f = open(filterpath + file + ".res")
-    filter = loadtxt(f)
-    f.close()
+    with open(filterpath + file + ".res", "r") as f:
+        filter = np.loadtxt(f)
+
     return splrep(filter[:, 0], filter[:, 1], k=1, s=0)
 
 
@@ -37,9 +37,9 @@ def get_sed(name):
     """
     Returns a model of the SED, a tuple of (wave,data)
     """
-    f = open(SEDpath + name + ".sed")
-    sed = loadtxt(f)
-    f.close()
+    with open(SEDpath + name + ".sed", "r") as f:
+        sed = np.loadtxt(f)
+
     return sed[:, 0], sed[:, 1]
 
 
@@ -133,4 +133,32 @@ def filter_magnitude(filter, spectrum, redshift, zp):
     observed = splrep(wave[cond], (response * data[cond]), s=0, k=1)
     flux = splint(wmin, wmax, observed)
     flux = (response * data[cond]).sum()
+
     return -2.5 * log10(flux) + zp
+
+
+def save_lime_sed(input_path):
+    """
+    Given an SED of LIME coefficients for the Moon model, save the SED to a file
+    readable by get_sed.
+    """
+    try:
+        with open(input_path, "r") as f:
+            lines = f.readlines()
+
+        datetime = [
+            line.split(",")[-1].strip("\n").replace(" ", "_").replace(":", "_")
+            for line in lines
+            if line.startswith("datetime")
+        ][0]
+        ind = [i for i, line in enumerate(lines) if line.startswith("Wavelengths (nm)")][0]
+        lines = lines[ind + 1 :]
+        wave = np.array([float(line.split(",")[0]) for line in lines]) * 10  # convert from nm to Angstroms
+        irradiance = np.array([float(line.split(",")[1]) for line in lines])
+        errors = np.array([float(line.split(",")[2]) for line in lines])
+        data = np.vstack([wave, irradiance, errors]).T
+        np.savetxt(SEDpath + f"moon_{datetime}.sed", data, header="Wavelength (Angstroms)  Irradiance  Error", fmt="%e")
+    except Exception as e:
+        print(f"Error processing {input_path}: {e}")
+
+    return None
