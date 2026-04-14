@@ -21,29 +21,45 @@ sed_list.sort()
 sed_list = [sed.split("/")[-1].split(".sed")[0] for sed in sed_list]
 
 BC03factor = 3.826e33 / (4 * pi * 3.08568e19**2)
+ERRBAR_FACTOR = 0.01  # factor for error bars if not present in the SED and filter files
+ERRBAR_SAMPLES = 1000  # number of samples to draw when computing error bars
 
 
-def filterfromfile(file):
+def filterfromfile(file, errbar=False):
     """
     Create a filter model from a file.
     """
     with open(filterpath + file + ".res", "r") as f:
         filter = np.loadtxt(f)
 
-    return splrep(filter[:, 0], filter[:, 1], k=1, s=0)
+    if errbar:
+        if filter.shape[1] == 3:
+            return splrep(filter[:, 0], filter[:, 1], k=1, s=0), splrep(filter[:, 0], filter[:, 2], k=1, s=0)
+        else:
+            return splrep(filter[:, 0], filter[:, 1], k=1, s=0), splrep(
+                filter[:, 0], filter[:, 1] * ERRBAR_FACTOR, k=1, s=0
+            )
+    else:
+        return splrep(filter[:, 0], filter[:, 1], k=1, s=0)
 
 
-def get_sed(name):
+def get_sed(name, errbar=False):
     """
-    Returns a model of the SED, a tuple of (wave,data)
+    Returns a model of the SED, a tuple of (wave,data) or (wave,data,err)
     """
     with open(SEDpath + name + ".sed", "r") as f:
         sed = np.loadtxt(f)
 
-    return sed[:, 0], sed[:, 1]
+    if errbar:
+        if sed.shape[1] == 3:
+            return sed[:, 0], sed[:, 1], sed[:, 2]
+        else:
+            return sed[:, 0], sed[:, 1], np.full_like(sed[:, 1], ERRBAR_FACTOR)
+    else:
+        return sed[:, 0], sed[:, 1]
 
 
-def ab_filter_magnitude(filter, spectrum, redshift):
+def ab_filter_magnitude(filter, spectrum, redshift, errbar=False):
     """
     Determines the AB magnitude (up to a constant) given an input filter, SED,
         and redshift. Does not include cosmological dimming, so should only
@@ -53,37 +69,63 @@ def ab_filter_magnitude(filter, spectrum, redshift):
 
     wave = spectrum[0].copy()
     data = spectrum[1].copy()
-
-    # Convert to f_nu
-    data = data * wave**2 / (sol * 1e10)
+    if not errbar:
+        samples = 1
+    else:
+        samples = ERRBAR_SAMPLES
+        err = spectrum[2].copy()
+        loc = np.array(data)[:, None]
+        scale = np.array(err)[:, None]
+        data_sampled = np.random.normal(loc, scale, size=(len(data), samples))
+        filter_orig = filter  # tuples are immutable so no need to copy
+        filter = filter[0]
 
     # Redshift the spectrum and determine the valid range of wavelengths
     wave *= 1.0 + redshift
     wmin, wmax = filter[0][0], filter[0][-1]
     cond = (wave >= wmin) & (wave <= wmax)
 
-    # Evaluate the filter at the wavelengths of the spectrum
-    response = splev(wave[cond], filter)
+    if not errbar:
+        # Evaluate the filter at the wavelengths of the spectrum
+        response = splev(wave[cond], filter)
+    else:
+        response = splev(wave[cond], filter_orig[0])
+        response_err = splev(wave[cond], filter_orig[1])
+        loc = np.array(response)[:, None]
+        scale = np.array(response_err)[:, None]
+        response_sampled = np.random.normal(loc, scale, size=(len(response), samples))
 
-    freq = sol * 1e10 / wave[cond]
-    data = data[cond] * (1.0 + redshift)
+    estimates = []
+    for i in range(samples):
 
-    # Flip arrays
-    freq = freq[::-1]
-    data = data[::-1]
-    response = response[::-1]
+        data = data_sampled[:, i] if errbar else data
+        response = response_sampled[:, i] if errbar else response
 
-    # Integrate
-    observed = splrep(freq, response * data / freq, s=0, k=1)
-    flux = splint(freq[0], freq[-1], observed)
+        # Convert to f_nu
+        data = data * wave**2 / (sol * 1e10)
 
-    bp = splrep(freq, response / freq, s=0, k=1)
-    bandpass = splint(freq[0], freq[-1], bp)
+        freq = sol * 1e10 / wave[cond]
+        data = data[cond] * (1.0 + redshift)
 
-    return -2.5 * log10(flux / bandpass) - 48.6
+        # Flip arrays
+        freq = freq[::-1]
+        data = data[::-1]
+        response = response[::-1]
+
+        # Integrate
+        observed = splrep(freq, response * data / freq, s=0, k=1)
+        flux = splint(freq[0], freq[-1], observed)
+
+        bp = splrep(freq, response / freq, s=0, k=1)
+        bandpass = splint(freq[0], freq[-1], bp)
+
+        result = -2.5 * log10(flux / bandpass) - 48.6
+        estimates.append(result)
+
+    return (np.mean(estimates), np.std(estimates)) if errbar else (estimates[0], 0)
 
 
-def vega_filter_magnitude(filter, spectrum, redshift):
+def vega_filter_magnitude(filter, spectrum, redshift, errbar=False):
     """
     Determines the Vega magnitude (up to a constant) given an input filter,
         SED, and redshift.
@@ -106,7 +148,7 @@ def vega_filter_magnitude(filter, spectrum, redshift):
     flux = splint(wmin, wmax, observed)
 
     # Determine the magnitude of Vega through the filter
-    vwave, vdata = get_sed("Vega")
+    vwave, vdata = get_sed("Vega", errbar=errbar)
     cond = (vwave >= wmin) & (vwave <= wmax)
     response = splev(vwave[cond], filter)
     vega = splrep(vwave[cond], response * vdata[cond], s=0, k=1)
@@ -115,7 +157,7 @@ def vega_filter_magnitude(filter, spectrum, redshift):
     return -2.5 * log10(flux / vegacorr)  # +2.5*log10(1.+redshift)
 
 
-def filter_magnitude(filter, spectrum, redshift, zp):
+def filter_magnitude(filter, spectrum, redshift, zp, errbar=False):
 
     wave = spectrum[0].copy()
     data = spectrum[1].copy()

@@ -34,9 +34,11 @@ FLAGS
         -OL          Omega lambda [0.7]
         -plot        Illustrate results with a nice plot
         -test        Do an example run (the first one on the list below)
+        -errbar       Compute error bars
 
 INPUTS
         -m1       f         input magnitude
+        -m1_err   f         error on input magnitude (if -errbar is set)
         -f1       s         input filter
         -z1       f         input redshift
         -T        s         galaxy spectral type
@@ -75,8 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-convert", action="store_true", dest="convert")
     parser.add_argument("-plot", action="store_true", dest="plot")
     parser.add_argument("-test", action="store_true", dest="test")
+    parser.add_argument("-errbar", action="store_true", dest="errbar")
 
     parser.add_argument("-m1", type=float)
+    parser.add_argument("-m1_err", type=float)
     parser.add_argument("-f1")
     parser.add_argument("-z1", type=float)
     parser.add_argument("-T", dest="sedtype")
@@ -112,23 +116,29 @@ def mag2mag(argv=None):
     if args.m1 is None or args.f1 is None or args.z1 is None or args.sedtype is None:
         parser.error("Incomplete input information. Use -u for usage.")
 
-    f1 = tools.filterfromfile(args.f1)
-    f2 = f1 if args.f2 is None else tools.filterfromfile(args.f2)
+    if (args.m1_err is None and args.errbar) or not args.errbar:
+        args.m1_err = 0
+
+    f1 = tools.filterfromfile(args.f1, errbar=args.errbar)
+    f2 = f1 if args.f2 is None else tools.filterfromfile(args.f2, errbar=args.errbar)
     z2 = args.z1 if args.z2 is None else args.z2
 
-    sed = tools.get_sed(args.sedtype)
+    sed = tools.get_sed(args.sedtype, errbar=args.errbar)
 
     if args.vega:
-        filtermag = tools.vega_filter_magnitude(f1, sed, args.z1)
+        filtermag, filtermag_err = tools.vega_filter_magnitude(f1, sed, args.z1, errbar=args.errbar)
     else:
-        filtermag = tools.ab_filter_magnitude(f1, sed, args.z1)
+        filtermag, filtermag_err = tools.ab_filter_magnitude(f1, sed, args.z1, errbar=args.errbar)
 
     magoffset = args.m1 - filtermag
 
     if args.vega:
-        m2 = tools.vega_filter_magnitude(f2, sed, z2) + magoffset
+        m2, m2_err = tools.vega_filter_magnitude(f2, sed, z2, errbar=args.errbar)
+        m2 += magoffset
     else:
-        m2 = tools.ab_filter_magnitude(f2, sed, z2) + magoffset
+        m2, m2_err = tools.ab_filter_magnitude(f2, sed, z2, errbar=args.errbar)
+        m2 += magoffset
+    m2_err = np.sqrt(m2_err**2 + filtermag_err**2 + args.m1_err**2)
 
     if args.z1 != z2:
         dist = distances.Distance()
@@ -153,7 +163,7 @@ def mag2mag(argv=None):
             m2 -= vega_ab
 
     if not args.quiet:
-        print(m2)
+        print(f"{m2:.4f} +/- {m2_err:.4f}")
 
     if args.plot:
         plt.plot(sed[0] * (1.0 + args.z1), sed[1] / sed[1].mean(), c="k", label="Input SED")
@@ -161,6 +171,9 @@ def mag2mag(argv=None):
             plt.plot(sed[0] * (1.0 + z2), sed[1] / sed[1].mean(), c="r")
 
         wave = sed[0] * (1.0 + args.z1)
+        if args.errbar:
+            f1 = f1[0]
+            f2 = f2[0]
         cond = (wave >= f1[0][0]) & (wave <= f1[0][-1])
         plt.plot(wave[cond], splev(wave[cond], f1), c="b", label="Input Filter")
 
@@ -175,7 +188,7 @@ def mag2mag(argv=None):
         plt.legend()
         plt.show()
 
-    return m2
+    return (m2, m2_err)
 
 
 if __name__ == "__main__":
